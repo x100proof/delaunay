@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Delaunay Mesh</title>
+<style>
+  :root {
+    --bg: #f6f5f1;
+    --ink: #1d1d1f;
+    --muted: #6b6b70;
+    --point: #1d1d1f;
+    --edge: #8a8f99;
+    --tri-fill: rgba(232, 93, 4, 0.16);
+    --tri-edge: #e85d04;
+    --circle: #2563eb;
+    --panel: rgba(255, 255, 255, 0.88);
+    --panel-border: rgba(0, 0, 0, 0.08);
+    --btn: #1d1d1f;
+    --btn-ink: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121316;
+      --ink: #ececef;
+      --muted: #9a9aa2;
+      --point: #ececef;
+      --edge: #5b616d;
+      --tri-fill: rgba(251, 146, 60, 0.18);
+      --tri-edge: #fb923c;
+      --circle: #60a5fa;
+      --panel: rgba(28, 29, 34, 0.88);
+      --panel-border: rgba(255, 255, 255, 0.08);
+      --btn: #ececef;
+      --btn-ink: #121316;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  canvas {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+    cursor: crosshair;
+  }
+  body.explore canvas { cursor: default; }
+  header {
+    position: fixed;
+    top: max(16px, env(safe-area-inset-top));
+    left: 16px;
+    max-width: min(440px, calc(100% - 100px));
+    pointer-events: none;
+  }
+  h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+  }
+  header p {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+  }
+  .bar {
+    position: fixed;
+    left: 50%;
+    bottom: max(16px, env(safe-area-inset-bottom));
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 8px 8px 16px;
+    max-width: calc(100% - 32px);
+    border-radius: 999px;
+  }
+  .zoom {
+    position: fixed;
+    top: max(16px, env(safe-area-inset-top));
+    right: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px;
+    border-radius: 14px;
+  }
+  .zoom button {
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border-radius: 10px;
+    font-size: 22px;
+    line-height: 1;
+  }
+  .status {
+    color: var(--muted);
+    font-size: 14px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  button {
+    flex: none;
+    font: inherit;
+    font-weight: 600;
+    padding: 8px 18px;
+    border: 0;
+    border-radius: 999px;
+    background: var(--btn);
+    color: var(--btn-ink);
+    cursor: pointer;
+  }
+  button:disabled { opacity: 0.35; cursor: default; }
+  button[hidden] { display: none; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<header>
+  <h1>Delaunay Mesh</h1>
+  <p>A Delaunay mesh joins a set of points into triangles so that no point lies inside any triangle's circumcircle: the circle that passes through all three of its corners.</p>
+</header>
+<div class="zoom panel">
+  <button id="zoom-in" aria-label="Zoom in">+</button>
+  <button id="zoom-out" aria-label="Zoom out">&minus;</button>
+</div>
+<div class="bar panel">
+  <span class="status" id="status"></span>
+  <button id="confirm" disabled>Confirm</button>
+  <button id="reset" hidden>Reset</button>
+</div>
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const statusEl = document.getElementById("status");
+  const confirmBtn = document.getElementById("confirm");
+  const resetBtn = document.getElementById("reset");
+
+  // mode: "place" while adding points, "explore" after Confirm.
+  let mode = "place";
+  let points = [];      // [{x, y}] in world coordinates
+  let triangles = [];   // [[i, j, k]] indices into points, counter-clockwise
+  let touch = null;     // {x, y} last probe point (world) in explore mode
+  let hit = null;       // {tri, cx, cy, r} triangle containing touch (world), or null
+
+  // View transform: screen = world * s + (x, y).
+  const view = { s: 1, x: 0, y: 0 };
+  const MIN_SCALE = 0.1, MAX_SCALE = 50;
+  const toScreen = (p) => ({ x: p.x * view.s + view.x, y: p.y * view.s + view.y });
+  const toWorld = (sx, sy) => ({ x: (sx - view.x) / view.s, y: (sy - view.y) / view.s });
+
+  function zoomAt(sx, sy, factor) {
+    const w = toWorld(sx, sy);
+    view.s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, view.s * factor));
+    view.x = sx - w.x * view.s;
+    view.y = sy - w.y * view.s;
+    draw();
+  }
+
+  function colors() {
+    const s = getComputedStyle(document.documentElement);
+    const v = (n) => s.getPropertyValue(n).trim();
+    return {
+      point: v("--point"), edge: v("--edge"), triFill: v("--tri-fill"),
+      triEdge: v("--tri-edge"), circle: v("--circle"),
+    };
+  }
+
+  // ---- geometry ----
+
+  function circumcircle(a, b, c) {
+    const d = 2 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if (Math.abs(d) < 1e-12) return null;
+    const a2 = a.x * a.x + a.y * a.y;
+    const b2 = b.x * b.x + b.y * b.y;
+    const c2 = c.x * c.x + c.y * c.y;
+    const cx = (a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d;
+    const cy = (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d;
+    return { cx, cy, r: Math.hypot(a.x - cx, a.y - cy) };
+  }
+
+  function cross(o, a, b) {
+    return (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  }
+
+  // Bowyer-Watson. Returns triangles as index triples into pts.
+  function delaunay(pts) {
+    const n = pts.length;
+    if (n < 3) return [];
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
+      maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
+    }
+    const span = Math.max(maxX - minX, maxY - minY, 1) * 20;
+    const mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
+    // Super-triangle vertices live at indices n, n+1, n+2.
+    const all = pts.concat([
+      { x: mx - span, y: my - span },
+      { x: mx + span, y: my - span },
+      { x: mx, y: my + span },
+    ]);
+    const mk = (i, j, k) => {
+      if (cross(all[i], all[j], all[k]) < 0) [j, k] = [k, j];
+      return { v: [i, j, k], c: circumcircle(all[i], all[j], all[k]) };
+    };
+    let tris = [mk(n, n + 1, n + 2)];
+
+    for (let p = 0; p < n; p++) {
+      const pt = all[p];
+      const bad = [], keep = [];
+      for (const t of tris) {
+        const c = t.c;
+        if (c && Math.hypot(pt.x - c.cx, pt.y - c.cy) < c.r * (1 + 1e-10)) bad.push(t);
+        else keep.push(t);
+      }
+      // Boundary of the cavity = edges belonging to exactly one bad triangle.
+      const edgeCount = new Map();
+      const key = (a, b) => (a < b ? a + "," + b : b + "," + a);
+      for (const t of bad) {
+        for (let e = 0; e < 3; e++) {
+          const a = t.v[e], b = t.v[(e + 1) % 3];
+          const k = key(a, b);
+          const prev = edgeCount.get(k);
+          edgeCount.set(k, prev ? null : [a, b]);
+        }
+      }
+      tris = keep;
+      for (const edge of edgeCount.values()) {
+        if (edge) tris.push(mk(edge[0], edge[1], p));
+      }
+    }
+    return tris
+      .filter((t) => t.v.every((i) => i < n))
+      .filter((t) => Math.abs(cross(pts[t.v[0]], pts[t.v[1]], pts[t.v[2]])) > 1e-9)
+      .map((t) => t.v);
+  }
+
+  function findTriangle(q) {
+    const eps = -1e-9;
+    for (const t of triangles) {
+      const [a, b, c] = t.map((i) => points[i]);
+      if (cross(a, b, q) >= eps && cross(b, c, q) >= eps && cross(c, a, q) >= eps) return t;
+    }
+    return null;
+  }
+
+  // ---- rendering ----
+
+  let dpr = 1;
+  function resize() {
+    dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(window.innerWidth * dpr);
+    canvas.height = Math.round(window.innerHeight * dpr);
+    draw();
+  }
+
+  // Everything is projected to screen space before drawing so line widths
+  // and point sizes stay constant at any zoom level.
+  function draw() {
+    const col = colors();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    const sp = points.map(toScreen);
+
+    if (mode === "explore") {
+      // Mesh edges, each drawn once.
+      ctx.strokeStyle = col.edge;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const seen = new Set();
+      for (const t of triangles) {
+        for (let e = 0; e < 3; e++) {
+          const a = t[e], b = t[(e + 1) % 3];
+          const k = a < b ? a + "," + b : b + "," + a;
+          if (seen.has(k)) continue;
+          seen.add(k);
+          ctx.moveTo(sp[a].x, sp[a].y);
+          ctx.lineTo(sp[b].x, sp[b].y);
+        }
+      }
+      ctx.stroke();
+
+      if (hit) {
+        const [a, b, c] = hit.tri.map((i) => sp[i]);
+        const cc = toScreen({ x: hit.cx, y: hit.cy });
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y); ctx.closePath();
+        ctx.fillStyle = col.triFill;
+        ctx.fill();
+        ctx.strokeStyle = col.triEdge;
+        ctx.lineWidth = 2.5;
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(cc.x, cc.y, hit.r * view.s, 0, Math.PI * 2);
+        ctx.strokeStyle = col.circle;
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        // Perpendicular bisectors: from each side's midpoint to the circumcentre,
+        // with a right-angle mark at the midpoint.
+        ctx.strokeStyle = col.circle;
+        ctx.fillStyle = col.circle;
+        ctx.lineWidth = 1.5;
+        for (const [p, q] of [[a, b], [b, c], [c, a]]) {
+          const m = { x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 };
+          const len = Math.hypot(q.x - p.x, q.y - p.y) || 1;
+          const u = { x: (q.x - p.x) / len, y: (q.y - p.y) / len };
+          let nx = -u.y, ny = u.x;
+          if ((cc.x - m.x) * nx + (cc.y - m.y) * ny < 0) { nx = -nx; ny = -ny; }
+          if (Math.hypot(cc.x - m.x, cc.y - m.y) > 1) {
+            ctx.beginPath();
+            ctx.moveTo(m.x, m.y); ctx.lineTo(cc.x, cc.y);
+            ctx.stroke();
+          }
+          const k = 7;
+          ctx.beginPath();
+          ctx.moveTo(m.x + u.x * k, m.y + u.y * k);
+          ctx.lineTo(m.x + u.x * k + nx * k, m.y + u.y * k + ny * k);
+          ctx.lineTo(m.x + nx * k, m.y + ny * k);
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.lineWidth = 1.5;
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        // Circumcentre with a faint radius line to one vertex.
+        ctx.beginPath();
+        ctx.setLineDash([4, 4]);
+        ctx.moveTo(cc.x, cc.y); ctx.lineTo(a.x, a.y);
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.arc(cc.x, cc.y, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = col.circle;
+        ctx.fill();
+      }
+    }
+
+    ctx.fillStyle = col.point;
+    for (const p of sp) {
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    if (hit) {
+      ctx.fillStyle = col.triEdge;
+      for (const i of hit.tri) {
+        ctx.beginPath();
+        ctx.arc(sp[i].x, sp[i].y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+  }
+
+  function updateUI() {
+    document.body.classList.toggle("explore", mode === "explore");
+    if (mode === "place") {
+      const n = points.length;
+      statusEl.textContent = n === 0 ? "Tap to place points"
+        : n < 3 ? `${n} point${n === 1 ? "" : "s"} · need 3+`
+        : `${n} points`;
+      confirmBtn.hidden = false;
+      confirmBtn.disabled = n < 3;
+      resetBtn.hidden = n === 0;
+    } else {
+      statusEl.textContent = !touch ? `${triangles.length} triangles · tap inside the mesh`
+        : hit ? `r = ${hit.r.toFixed(1)} px`
+        : "Outside the mesh: no enclosing triangle";
+      confirmBtn.hidden = true;
+      resetBtn.hidden = false;
+    }
+  }
+
+  // ---- interaction ----
+
+  function addPoint(sx, sy) {
+    const w = toWorld(sx, sy);
+    // Ignore taps that land on top of an existing point (avoids duplicates).
+    if (points.some((p) => Math.hypot(p.x - w.x, p.y - w.y) * view.s < 3)) return;
+    points.push(w);
+    updateUI();
+    draw();
+  }
+
+  function probe(sx, sy) {
+    touch = toWorld(sx, sy);
+    const t = findTriangle(touch);
+    if (t) {
+      const c = circumcircle(points[t[0]], points[t[1]], points[t[2]]);
+      hit = { tri: t, cx: c.cx, cy: c.cy, r: c.r };
+    } else {
+      hit = null;
+    }
+    updateUI();
+    draw();
+  }
+
+  // Active pointers by id. One pointer = tap (place/probe) or drag-to-pan;
+  // two = pinch zoom + pan.
+  const pointers = new Map();
+  let pinch = null;    // {dist, mx, my} from the previous pinch frame
+  let gesture = null;  // single-pointer {id, x, y, lastX, lastY, panning}
+  const PAN_THRESHOLD = 6;
+
+  function pinchState() {
+    const [a, b] = [...pointers.values()];
+    return { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2 };
+  }
+
+  canvas.addEventListener("pointerdown", (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) {
+      gesture = null;
+      canvas.style.cursor = "";
+      pinch = pinchState();
+      return;
+    }
+    if (pointers.size > 2) return;
+    gesture = { id: e.pointerId, x: e.clientX, y: e.clientY, lastX: e.clientX, lastY: e.clientY, panning: false };
+  });
+
+  canvas.addEventListener("pointermove", (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pointers.size === 2) {
+      const next = pinchState();
+      view.x += next.mx - pinch.mx;
+      view.y += next.my - pinch.my;
+      zoomAt(next.mx, next.my, next.dist / pinch.dist);
+      pinch = next;
+    } else if (gesture && gesture.id === e.pointerId) {
+      if (!gesture.panning && Math.hypot(e.clientX - gesture.x, e.clientY - gesture.y) > PAN_THRESHOLD) {
+        gesture.panning = true;
+        canvas.style.cursor = "grabbing";
+      }
+      if (gesture.panning) {
+        view.x += e.clientX - gesture.lastX;
+        view.y += e.clientY - gesture.lastY;
+        draw();
+      }
+      gesture.lastX = e.clientX;
+      gesture.lastY = e.clientY;
+    }
+  });
+
+  function endPointer(e) {
+    pointers.delete(e.pointerId);
+    // Taps act on release so a drag can become a pan instead, leaving the
+    // points and current selection untouched.
+    if (e.type === "pointerup" && gesture && gesture.id === e.pointerId && !gesture.panning) {
+      if (mode === "place") addPoint(gesture.x, gesture.y);
+      else probe(gesture.x, gesture.y);
+    }
+    if (gesture && gesture.id === e.pointerId) gesture = null;
+    if (pointers.size < 2) pinch = null;
+    canvas.style.cursor = "";
+  }
+  canvas.addEventListener("pointerup", endPointer);
+  canvas.addEventListener("pointercancel", endPointer);
+
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const dy = e.deltaMode === 1 ? e.deltaY * 16 : e.deltaY;
+    zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.0015));
+  }, { passive: false });
+
+  const zoomCentre = (f) => zoomAt(window.innerWidth / 2, window.innerHeight / 2, f);
+  document.getElementById("zoom-in").addEventListener("click", () => zoomCentre(1.25));
+  document.getElementById("zoom-out").addEventListener("click", () => zoomCentre(1 / 1.25));
+
+  confirmBtn.addEventListener("click", () => {
+    triangles = delaunay(points);
+    if (triangles.length === 0) {
+      statusEl.textContent = "Points are collinear; add one off the line";
+      return;
+    }
+    mode = "explore";
+    touch = null;
+    hit = null;
+    updateUI();
+    draw();
+  });
+
+  resetBtn.addEventListener("click", () => {
+    mode = "place";
+    points = [];
+    triangles = [];
+    touch = null;
+    hit = null;
+    view.s = 1; view.x = 0; view.y = 0;
+    updateUI();
+    draw();
+  });
+
+  window.addEventListener("resize", resize);
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", draw);
+
+  // Exposed for headless checks.
+  window.__app = {
+    get points() { return points; }, get triangles() { return triangles; },
+    get hit() { return hit; }, view, delaunay, circumcircle,
+  };
+
+  resize();
+  updateUI();
+})();
+</script>
+</body>
+</html>
