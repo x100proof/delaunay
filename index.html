@@ -14,6 +14,7 @@
     --tri-fill: rgba(232, 93, 4, 0.16);
     --tri-edge: #e85d04;
     --circle: #2563eb;
+    --rim: #1e3a8a;
     --bad: #dc2626;
     --bad-fill: rgba(220, 38, 38, 0.16);
     --new: #16a34a;
@@ -34,6 +35,7 @@
       --tri-fill: rgba(251, 146, 60, 0.18);
       --tri-edge: #fb923c;
       --circle: #60a5fa;
+      --rim: #c7d9ff;
       --bad: #f87171;
       --bad-fill: rgba(248, 113, 113, 0.18);
       --new: #4ade80;
@@ -263,7 +265,7 @@
     const v = (n) => s.getPropertyValue(n).trim();
     return {
       point: v("--point"), edge: v("--edge"), triFill: v("--tri-fill"),
-      triEdge: v("--tri-edge"), circle: v("--circle"), bad: v("--bad"),
+      triEdge: v("--tri-edge"), circle: v("--circle"), rim: v("--rim"), bad: v("--bad"),
       badFill: v("--bad-fill"), newEdge: v("--new"), newFill: v("--new-fill"),
       future: v("--future"), muted: v("--muted"),
     };
@@ -495,6 +497,9 @@
     const n = trace.n;
     const verts = (list) => list.map((tri) => tri.v);
     const ins = b.ins;
+    // The hole's boundary (the rim) is drawn in its own blue throughout the
+    // test, cut and fill, since those edges survive. The bad triangles' other
+    // edges are red: they are the ones that disappear.
 
     if (b.kind === "cleanup") {
       const removed = verts(trace.removed);
@@ -513,7 +518,8 @@
       const bad = verts(ins.bad);
       strokeEdges(sp, uniqueEdges(verts(ins.before)), col.edge, 1);
       fillTris(sp, bad, col.badFill, t);
-      strokeEdges(sp, uniqueEdges(bad), col.bad, 2, t);
+      strokeEdges(sp, ins.interior, col.bad, 2, t);
+      strokeEdges(sp, ins.rim, col.rim, 2.5, t);
       // Each circle sweeps round, ending up visibly enclosing the new point.
       ctx.strokeStyle = col.circle;
       ctx.lineWidth = 2;
@@ -528,7 +534,7 @@
       strokeEdges(sp, uniqueEdges(verts(ins.keep)), col.edge, 1);
       fillTris(sp, bad, col.badFill, 1 - t);
       strokeVanishing(sp, ins.interior, col.bad, t);
-      strokeEdges(sp, ins.rim, col.triEdge, 2.5);
+      strokeEdges(sp, ins.rim, col.rim, 2.5);
       ctx.globalAlpha = 1 - t;
       ctx.strokeStyle = col.circle;
       ctx.lineWidth = 2;
@@ -543,7 +549,7 @@
       const p = sp[ins.p];
       strokeEdges(sp, uniqueEdges(verts(ins.keep)), col.edge, 1);
       fillTris(sp, verts(ins.added), col.newFill, t);
-      strokeEdges(sp, ins.rim, col.triEdge, 2.5, 1 - 0.6 * t);
+      strokeEdges(sp, ins.rim, col.rim, 2.5);
       // Spokes grow from the new point out to every corner of the rim.
       const corners = new Set(ins.rim.flat());
       ctx.strokeStyle = col.newEdge;
