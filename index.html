@@ -14,6 +14,11 @@
     --tri-fill: rgba(232, 93, 4, 0.16);
     --tri-edge: #e85d04;
     --circle: #2563eb;
+    --bad: #dc2626;
+    --bad-fill: rgba(220, 38, 38, 0.16);
+    --new: #16a34a;
+    --new-fill: rgba(22, 163, 74, 0.14);
+    --future: rgba(29, 29, 31, 0.25);
     --panel: rgba(255, 255, 255, 0.88);
     --panel-border: rgba(0, 0, 0, 0.08);
     --btn: #1d1d1f;
@@ -29,6 +34,11 @@
       --tri-fill: rgba(251, 146, 60, 0.18);
       --tri-edge: #fb923c;
       --circle: #60a5fa;
+      --bad: #f87171;
+      --bad-fill: rgba(248, 113, 113, 0.18);
+      --new: #4ade80;
+      --new-fill: rgba(74, 222, 128, 0.14);
+      --future: rgba(236, 236, 239, 0.28);
       --panel: rgba(28, 29, 34, 0.88);
       --panel-border: rgba(255, 255, 255, 0.08);
       --btn: #ececef;
@@ -130,7 +140,45 @@
     cursor: pointer;
   }
   button:disabled { opacity: 0.35; cursor: default; }
-  button[hidden] { display: none; }
+  [hidden] { display: none !important; }
+  body.replay canvas { cursor: default; }
+  body.replay .bar { gap: 6px; padding: 6px; }
+  button.ghost {
+    background: transparent;
+    color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--panel-border);
+  }
+  button.icon {
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+  button.icon svg { width: 18px; height: 18px; fill: currentColor; }
+  #speed { min-width: 52px; padding: 8px 10px; font-variant-numeric: tabular-nums; }
+  .caption {
+    position: fixed;
+    left: 50%;
+    bottom: calc(max(16px, env(safe-area-inset-bottom)) + 64px);
+    transform: translateX(-50%);
+    width: min(520px, calc(100% - 32px));
+    padding: 10px 14px;
+    border-radius: 14px;
+    font-size: 14px;
+  }
+  .caption-head {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    color: var(--muted);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    font-variant-numeric: tabular-nums;
+  }
+  .caption-text { margin: 4px 0 0; }
 </style>
 </head>
 <body>
@@ -143,9 +191,25 @@
   <button id="zoom-in" aria-label="Zoom in">+</button>
   <button id="zoom-out" aria-label="Zoom out">&minus;</button>
 </div>
+<div class="caption panel" id="caption" hidden aria-live="polite">
+  <div class="caption-head"><span id="caption-stage"></span><span id="caption-step"></span></div>
+  <p class="caption-text" id="caption-text"></p>
+</div>
 <div class="bar panel">
   <span class="status" id="status"></span>
   <button id="confirm" disabled>Confirm</button>
+  <button id="back" class="icon ghost" hidden aria-label="Previous step">
+    <svg viewBox="0 0 24 24"><path d="M6 5h2v14H6zM20 5v14L9 12z"/></svg>
+  </button>
+  <button id="play" class="icon" hidden aria-label="Pause">
+    <svg viewBox="0 0 24 24"><path id="play-glyph" d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>
+  </button>
+  <button id="next" class="icon ghost" hidden aria-label="Next step">
+    <svg viewBox="0 0 24 24"><path d="M16 5h2v14h-2zM4 5v14l11-7z"/></svg>
+  </button>
+  <button id="speed" class="ghost" hidden aria-label="Playback speed">1×</button>
+  <button id="skip" class="ghost" hidden>Skip</button>
+  <button id="replay" class="ghost" hidden>Replay</button>
   <button id="reset" hidden>Reset</button>
 </div>
 <script>
@@ -155,17 +219,33 @@
   const statusEl = document.getElementById("status");
   const confirmBtn = document.getElementById("confirm");
   const resetBtn = document.getElementById("reset");
+  const replayBtn = document.getElementById("replay");
+  const backBtn = document.getElementById("back");
+  const playBtn = document.getElementById("play");
+  const playGlyph = document.getElementById("play-glyph");
+  const nextBtn = document.getElementById("next");
+  const speedBtn = document.getElementById("speed");
+  const skipBtn = document.getElementById("skip");
+  const captionEl = document.getElementById("caption");
+  const captionStage = document.getElementById("caption-stage");
+  const captionStep = document.getElementById("caption-step");
+  const captionText = document.getElementById("caption-text");
+  const headerEl = document.querySelector("header");
+  const barEl = document.querySelector(".bar");
 
-  // mode: "place" while adding points, "explore" after Confirm.
+  // mode: "place" while adding points, "replay" while the build plays back,
+  // "explore" once the mesh is finished.
   let mode = "place";
   let points = [];      // [{x, y}] in world coordinates
   let triangles = [];   // [[i, j, k]] indices into points, counter-clockwise
   let touch = null;     // {x, y} last probe point (world) in explore mode
   let hit = null;       // {tri, cx, cy, r} triangle containing touch (world), or null
+  let replay = null;    // playback state in replay mode, see startReplay()
 
   // View transform: screen = world * s + (x, y).
   const view = { s: 1, x: 0, y: 0 };
-  const MIN_SCALE = 0.1, MAX_SCALE = 50;
+  // Low enough to fit the whole super-triangle on a phone screen.
+  const MIN_SCALE = 0.002, MAX_SCALE = 50;
   const toScreen = (p) => ({ x: p.x * view.s + view.x, y: p.y * view.s + view.y });
   const toWorld = (sx, sy) => ({ x: (sx - view.x) / view.s, y: (sy - view.y) / view.s });
 
@@ -174,6 +254,7 @@
     view.s = Math.min(MAX_SCALE, Math.max(MIN_SCALE, view.s * factor));
     view.x = sx - w.x * view.s;
     view.y = sy - w.y * view.s;
+    if (replay) replay.cam = null;  // the user's own zoom wins over the camera move
     draw();
   }
 
@@ -182,7 +263,9 @@
     const v = (n) => s.getPropertyValue(n).trim();
     return {
       point: v("--point"), edge: v("--edge"), triFill: v("--tri-fill"),
-      triEdge: v("--tri-edge"), circle: v("--circle"),
+      triEdge: v("--tri-edge"), circle: v("--circle"), bad: v("--bad"),
+      badFill: v("--bad-fill"), newEdge: v("--new"), newFill: v("--new-fill"),
+      future: v("--future"), muted: v("--muted"),
     };
   }
 
@@ -204,7 +287,9 @@
   }
 
   // Bowyer-Watson. Returns triangles as index triples into pts.
-  function delaunay(pts) {
+  // If a trace object is passed, each insertion is recorded into it so the
+  // build can be replayed step by step; the algorithm itself is unchanged.
+  function delaunay(pts, trace) {
     const n = pts.length;
     if (n < 3) return [];
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
@@ -212,7 +297,10 @@
       minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
       maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
     }
-    const span = Math.max(maxX - minX, maxY - minY, 1) * 20;
+    // Just big enough to enclose the points with a small margin: the slanted
+    // sides clear a box of half-size h when span >= 3h.
+    const h = Math.max(maxX - minX, maxY - minY, 1) / 2;
+    const span = 3 * (h * 1.1 + 12);
     const mx = (minX + maxX) / 2, my = (minY + maxY) / 2;
     // Super-triangle vertices live at indices n, n+1, n+2.
     const all = pts.concat([
@@ -225,9 +313,11 @@
       return { v: [i, j, k], c: circumcircle(all[i], all[j], all[k]) };
     };
     let tris = [mk(n, n + 1, n + 2)];
+    if (trace) Object.assign(trace, { all, n, inserts: [] });
 
     for (let p = 0; p < n; p++) {
       const pt = all[p];
+      const before = tris;
       const bad = [], keep = [];
       for (const t of tris) {
         const c = t.c;
@@ -236,24 +326,80 @@
       }
       // Boundary of the cavity = edges belonging to exactly one bad triangle.
       const edgeCount = new Map();
+      const interior = [];
       const key = (a, b) => (a < b ? a + "," + b : b + "," + a);
       for (const t of bad) {
         for (let e = 0; e < 3; e++) {
           const a = t.v[e], b = t.v[(e + 1) % 3];
           const k = key(a, b);
           const prev = edgeCount.get(k);
+          if (prev) interior.push([a, b]);
           edgeCount.set(k, prev ? null : [a, b]);
         }
       }
+      const kept = keep.slice();
       tris = keep;
       for (const edge of edgeCount.values()) {
         if (edge) tris.push(mk(edge[0], edge[1], p));
       }
+      if (trace) {
+        trace.inserts.push({
+          p, before, bad, keep: kept, interior,
+          rim: [...edgeCount.values()].filter(Boolean),
+          added: tris.slice(kept.length),
+        });
+      }
     }
-    return tris
+    // Remove the super-triangle's corners one at a time. Some true Delaunay
+    // triangles along the hull were never built because their circumcircle
+    // held a corner, so simply dropping the corner triangles would leave
+    // notches. Instead, deleting a corner leaves a gap bounded by its "link"
+    // (the chain of vertices around it), which is refilled by repeatedly
+    // clipping an ear of the chain whose circumcircle holds no other chain vertex.
+    const last = tris;
+    for (let s = n; s < n + 3; s++) {
+      const rest = [], next = new Map(), hasPrev = new Set();
+      for (const t of tris) {
+        const i = t.v.indexOf(s);
+        if (i < 0) { rest.push(t); continue; }
+        // Triangles are counter-clockwise, so (s, a, b) gives link edge a -> b.
+        const a = t.v[(i + 1) % 3], b = t.v[(i + 2) % 3];
+        next.set(a, b);
+        hasPrev.add(b);
+      }
+      // The corner is on the hull, so its link is an open chain.
+      const chain = [[...next.keys()].find((a) => !hasPrev.has(a))];
+      while (next.has(chain.at(-1)) && chain.length <= next.size) chain.push(next.get(chain.at(-1)));
+      let clipped = true;
+      while (clipped) {
+        clipped = false;
+        for (let i = 1; i < chain.length - 1; i++) {
+          const a = chain[i - 1], b = chain[i], c = chain[i + 1];
+          // Only ears that bulge towards the corner lie inside the gap.
+          if (cross(all[a], all[b], all[c]) <= 0) continue;
+          const cc = circumcircle(all[a], all[b], all[c]);
+          if (!cc || chain.some((v) => v !== a && v !== b && v !== c &&
+              Math.hypot(all[v].x - cc.cx, all[v].y - cc.cy) < cc.r * (1 - 1e-10))) continue;
+          rest.push(mk(a, b, c));
+          chain.splice(i, 1);
+          clipped = true;
+          break;
+        }
+      }
+      tris = rest;
+    }
+
+    const final = tris
       .filter((t) => t.v.every((i) => i < n))
-      .filter((t) => Math.abs(cross(pts[t.v[0]], pts[t.v[1]], pts[t.v[2]])) > 1e-9)
-      .map((t) => t.v);
+      .filter((t) => Math.abs(cross(pts[t.v[0]], pts[t.v[1]], pts[t.v[2]])) > 1e-9);
+    if (trace) {
+      const key = (t) => [...t.v].sort((a, b) => a - b).join();
+      const lastKeys = new Set(last.map(key)), finalKeys = new Set(final.map(key));
+      trace.final = final;
+      trace.removed = last.filter((t) => !finalKeys.has(key(t)));
+      trace.patched = final.filter((t) => !lastKeys.has(key(t)));
+    }
+    return final.map((t) => t.v);
   }
 
   function findTriangle(q) {
@@ -275,31 +421,189 @@
     draw();
   }
 
+  // Each edge of a set of index triples, listed once.
+  function uniqueEdges(tris) {
+    const seen = new Map();
+    for (const t of tris) {
+      for (let e = 0; e < 3; e++) {
+        const a = t[e], b = t[(e + 1) % 3];
+        const k = a < b ? a + "," + b : b + "," + a;
+        if (!seen.has(k)) seen.set(k, [a, b]);
+      }
+    }
+    return [...seen.values()];
+  }
+
+  function strokeEdges(sp, edges, color, width, alpha = 1, dash = []) {
+    ctx.globalAlpha = alpha;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = width;
+    ctx.setLineDash(dash);
+    ctx.lineCap = dash.length ? "round" : "butt";
+    ctx.beginPath();
+    for (const [a, b] of edges) {
+      ctx.moveTo(sp[a].x, sp[a].y);
+      ctx.lineTo(sp[b].x, sp[b].y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineCap = "butt";
+    ctx.globalAlpha = 1;
+  }
+
+  // Edges on their way out turn dotted first, then fade away.
+  const VANISH_DOTTED = 0.35;  // share of the animation spent dotted before fading
+  function strokeVanishing(sp, edges, color, t) {
+    const alpha = t < VANISH_DOTTED ? 1 : 1 - (t - VANISH_DOTTED) / (1 - VANISH_DOTTED);
+    if (t > 0) strokeEdges(sp, edges, color, 2, alpha, [1, 5]);
+    else strokeEdges(sp, edges, color, 2);
+  }
+
+  const edgeKey = ([a, b]) => (a < b ? a + "," + b : b + "," + a);
+  function edgesNotIn(edges, other) {
+    const keep = new Set(other.map(edgeKey));
+    return edges.filter((e) => !keep.has(edgeKey(e)));
+  }
+
+  function fillTris(sp, tris, color, alpha = 1) {
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    for (const [a, b, c] of tris) {
+      ctx.moveTo(sp[a].x, sp[a].y); ctx.lineTo(sp[b].x, sp[b].y); ctx.lineTo(sp[c].x, sp[c].y);
+      ctx.closePath();
+    }
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  function dot(p, r, color, alpha = 1) {
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+
+  // One frame of the replay: the current beat, drawn at animation progress t.
+  function drawReplay(col) {
+    const { trace, beats, beat } = replay;
+    const b = beats[beat];
+    const t = ease(animProgress());
+    const sp = trace.all.map(toScreen);
+    const n = trace.n;
+    const verts = (list) => list.map((tri) => tri.v);
+    const ins = b.ins;
+
+    if (b.kind === "cleanup") {
+      const removed = verts(trace.removed);
+      const staying = uniqueEdges(verts(trace.final.filter((tri) => !trace.patched.includes(tri))));
+      fillTris(sp, removed, col.badFill, 1 - t);
+      strokeEdges(sp, staying, col.edge, 1);
+      strokeVanishing(sp, edgesNotIn(uniqueEdges(removed), staying), col.bad, t);
+    } else if (b.kind === "patch") {
+      const patched = verts(trace.patched);
+      strokeEdges(sp, uniqueEdges(verts(trace.final)), col.edge, 1);
+      fillTris(sp, patched, col.newFill, t);
+      strokeEdges(sp, uniqueEdges(patched), col.newEdge, 2, t);
+    } else if (b.kind === "point") {
+      strokeEdges(sp, uniqueEdges(verts(ins.before)), col.edge, 1);
+    } else if (b.kind === "test") {
+      const bad = verts(ins.bad);
+      strokeEdges(sp, uniqueEdges(verts(ins.before)), col.edge, 1);
+      fillTris(sp, bad, col.badFill, t);
+      strokeEdges(sp, uniqueEdges(bad), col.bad, 2, t);
+      // Each circle sweeps round, ending up visibly enclosing the new point.
+      ctx.strokeStyle = col.circle;
+      ctx.lineWidth = 2;
+      for (const tri of ins.bad) {
+        const cc = toScreen({ x: tri.c.cx, y: tri.c.cy });
+        ctx.beginPath();
+        ctx.arc(cc.x, cc.y, tri.c.r * view.s, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * t);
+        ctx.stroke();
+      }
+    } else if (b.kind === "cut") {
+      const bad = verts(ins.bad);
+      strokeEdges(sp, uniqueEdges(verts(ins.keep)), col.edge, 1);
+      fillTris(sp, bad, col.badFill, 1 - t);
+      strokeVanishing(sp, ins.interior, col.bad, t);
+      strokeEdges(sp, ins.rim, col.triEdge, 2.5);
+      ctx.globalAlpha = 1 - t;
+      ctx.strokeStyle = col.circle;
+      ctx.lineWidth = 2;
+      for (const tri of ins.bad) {
+        const cc = toScreen({ x: tri.c.cx, y: tri.c.cy });
+        ctx.beginPath();
+        ctx.arc(cc.x, cc.y, tri.c.r * view.s, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
+    } else if (b.kind === "fill") {
+      const p = sp[ins.p];
+      strokeEdges(sp, uniqueEdges(verts(ins.keep)), col.edge, 1);
+      fillTris(sp, verts(ins.added), col.newFill, t);
+      strokeEdges(sp, ins.rim, col.triEdge, 2.5, 1 - 0.6 * t);
+      // Spokes grow from the new point out to every corner of the rim.
+      const corners = new Set(ins.rim.flat());
+      ctx.strokeStyle = col.newEdge;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for (const v of corners) {
+        ctx.moveTo(p.x, p.y);
+        ctx.lineTo(p.x + (sp[v].x - p.x) * t, p.y + (sp[v].y - p.y) * t);
+      }
+      ctx.stroke();
+    }
+
+    // Super-triangle corners, hollow, until the clean-up removes them.
+    const superAlpha = b.kind === "cleanup" ? 1 - t : b.kind === "patch" ? 0 : 1;
+    ctx.globalAlpha = superAlpha;
+    ctx.strokeStyle = col.muted;
+    ctx.lineWidth = 2;
+    for (let i = n; i < n + 3; i++) {
+      ctx.beginPath();
+      ctx.arc(sp[i].x, sp[i].y, 6, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // Points already in the mesh are solid, ones still to come are faint, and
+    // the point being inserted is highlighted (with a ripple as it arrives).
+    const current = ins ? ins.p : n;
+    for (let i = 0; i < n; i++) {
+      if (i === current) continue;
+      dot(sp[i], 4.5, i < current ? col.point : col.future);
+    }
+    if (ins) {
+      const p = sp[ins.p];
+      if (b.kind === "point") {
+        ctx.globalAlpha = 1 - t;
+        ctx.strokeStyle = col.triEdge;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 6 + 26 * t, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+      dot(p, 6, col.triEdge);
+    }
+  }
+
   // Everything is projected to screen space before drawing so line widths
   // and point sizes stay constant at any zoom level.
   function draw() {
     const col = colors();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    if (mode === "replay") {
+      drawReplay(col);
+      return;
+    }
     const sp = points.map(toScreen);
 
     if (mode === "explore") {
-      // Mesh edges, each drawn once.
-      ctx.strokeStyle = col.edge;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      const seen = new Set();
-      for (const t of triangles) {
-        for (let e = 0; e < 3; e++) {
-          const a = t[e], b = t[(e + 1) % 3];
-          const k = a < b ? a + "," + b : b + "," + a;
-          if (seen.has(k)) continue;
-          seen.add(k);
-          ctx.moveTo(sp[a].x, sp[a].y);
-          ctx.lineTo(sp[b].x, sp[b].y);
-        }
-      }
-      ctx.stroke();
+      strokeEdges(sp, uniqueEdges(triangles), col.edge, 1);
 
       if (hit) {
         const [a, b, c] = hit.tri.map((i) => sp[i]);
@@ -379,21 +683,259 @@
 
   function updateUI() {
     document.body.classList.toggle("explore", mode === "explore");
+    document.body.classList.toggle("replay", mode === "replay");
+    for (const el of [backBtn, playBtn, nextBtn, speedBtn, skipBtn]) el.hidden = mode !== "replay";
+    captionEl.hidden = mode !== "replay";
+    statusEl.hidden = mode === "replay";
+    replayBtn.hidden = mode !== "explore";
+    confirmBtn.hidden = mode !== "place";
     if (mode === "place") {
       const n = points.length;
       statusEl.textContent = n === 0 ? "Tap to place points"
         : n < 3 ? `${n} point${n === 1 ? "" : "s"} · need 3+`
         : `${n} points`;
-      confirmBtn.hidden = false;
       confirmBtn.disabled = n < 3;
       resetBtn.hidden = n === 0;
+    } else if (mode === "replay") {
+      resetBtn.hidden = true;
+      updateReplayUI();
     } else {
       statusEl.textContent = !touch ? `${triangles.length} triangles · tap inside the mesh`
         : hit ? `r = ${hit.r.toFixed(1)} px`
         : "Outside the mesh: no enclosing triangle";
-      confirmBtn.hidden = true;
       resetBtn.hidden = false;
     }
+  }
+
+  // ---- replay ----
+  //
+  // Confirm records the Bowyer-Watson run, then plays it back as a list of
+  // beats: four per inserted point (new point, find bad triangles, cut the
+  // hole, fill it), then the clean-up (remove the super-triangle, and patch
+  // the hull if that left gaps). Each beat animates for the first part of
+  // its length and then holds.
+
+  const SPEEDS = [0.5, 1, 2, 4, 8];
+  const BEAT_MS = 1000;      // beat length at 1×
+  const STEP_MS = 400;       // fixed beat length for manual Back / Next
+  const ANIM_SHARE = 0.7;    // fraction of a beat spent animating
+  const ZOOM_STEPS = 4;      // insertions over which the camera zooms in
+  const STAGES = ["New point", "Find bad triangles", "Cut a hole", "Fill the hole"];
+  const KINDS = ["point", "test", "cut", "fill"];
+
+  let speed = 1;
+  try {
+    const saved = Number(localStorage.getItem("delaunay.speed"));
+    if (SPEEDS.includes(saved)) speed = saved;
+  } catch {}
+
+  const ease = (t) => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2);
+  const animProgress = () => Math.min(1, replay.progress / ANIM_SHARE);
+
+  function startReplay(trace) {
+    const beats = [];
+    trace.inserts.forEach((ins, i) => {
+      for (const kind of KINDS) beats.push({ kind, ins, i });
+    });
+    beats.push({ kind: "cleanup" });
+    if (trace.patched.length) beats.push({ kind: "patch" });
+    replay = { trace, beats, beat: 0, progress: 0, playing: true, manual: false, cam: null };
+    mode = "replay";
+    updateUI();
+    goTo(0, false);
+  }
+
+  function goTo(beat, manual) {
+    const prevKey = replay.camKey;
+    replay.beat = beat;
+    replay.progress = 0;
+    replay.manual = manual;
+    // Only move the camera when the framing actually changes, so the user can
+    // pan or zoom in to look closer without being pulled back every beat.
+    replay.camKey = camKey(beat);
+    replay.cam = replay.camKey !== prevKey ? { from: currentCam(), to: camFor(beat), t: 0 } : null;
+    updateReplayUI();
+    kick();
+  }
+
+  function finishReplay() {
+    triangles = replay.trace.final.map((t) => t.v);
+    replay = null;
+    mode = "explore";
+    touch = null;
+    hit = null;
+    cancelAnimationFrame(raf);
+    raf = 0;
+    updateUI();
+    draw();
+  }
+
+  function step(dir) {
+    const next = replay.beat + dir;
+    replay.playing = false;
+    if (next >= replay.beats.length) return finishReplay();
+    if (next >= 0) goTo(next, true);
+    else updateReplayUI();
+  }
+
+  function togglePlay() {
+    if (replay.playing) {
+      replay.playing = false;
+      updateReplayUI();
+      return;
+    }
+    replay.playing = true;
+    replay.manual = false;
+    // A beat that has already finished moves straight on to the next one.
+    if (replay.progress >= 1) {
+      if (replay.beat + 1 >= replay.beats.length) return finishReplay();
+      goTo(replay.beat + 1, false);
+    } else {
+      updateReplayUI();
+      kick();
+    }
+  }
+
+  function updateReplayUI() {
+    const { beats, beat, trace, playing } = replay;
+    const b = beats[beat];
+    captionStep.textContent = `Step ${beat + 1} / ${beats.length}`;
+    if (b.kind === "cleanup") {
+      captionStage.textContent = "Clean-up · Remove the super-triangle";
+      const r = trace.removed.length;
+      captionText.textContent = `Last, remove the ${r} triangle${r === 1 ? "" : "s"} attached to the super-triangle's corners.` +
+        (trace.patched.length ? "" : " What's left is the Delaunay mesh of your points.");
+    } else if (b.kind === "patch") {
+      captionStage.textContent = "Clean-up · Patch the edge";
+      const p = trace.patched.length;
+      captionText.textContent = `That leaves ${p === 1 ? "a gap" : "gaps"} along the edge: ${p === 1 ? "a triangle" : `${p} triangles`} of the true mesh never got built, because ${p === 1 ? "its circumcircle" : "their circumcircles"} reached a super-triangle corner. With the corners gone, fill ${p === 1 ? "it" : "them"} in. Now it's the Delaunay mesh of your points.`;
+    } else {
+      const { ins, i } = b;
+      const k = ins.bad.length;
+      captionStage.textContent = `Point ${i + 1} of ${trace.n} · ${STAGES[KINDS.indexOf(b.kind)]}`;
+      captionText.textContent = {
+        point: i === 0
+          ? "The mesh starts as one “super-triangle”, just big enough to enclose every point. Points are added one at a time, starting with this one."
+          : "Add the next point to the mesh.",
+        test: k === 1
+          ? "Only one triangle's circumcircle contains the new point, so that triangle breaks the Delaunay rule."
+          : `${k} triangles have circumcircles that contain the new point, so they break the Delaunay rule.`,
+        cut: k === 1
+          ? "Remove it. Its three edges form the rim of the hole left behind."
+          : `Remove them. Edges they shared go too, leaving one hole with ${ins.rim.length} edges around its rim.`,
+        fill: `Join the new point to every corner of the rim. ${ins.added.length} new triangles fill the hole, and no circumcircle contains a point any more.`,
+      }[b.kind];
+    }
+    backBtn.disabled = beat === 0;
+    playBtn.setAttribute("aria-label", playing ? "Pause" : "Play");
+    playGlyph.setAttribute("d", playing ? "M6 5h4v14H6zM14 5h4v14h-4z" : "M7 4v16l13-8z");
+    speedBtn.textContent = `${speed}×`;
+  }
+
+  // The animation loop runs only while something is moving.
+  let raf = 0, lastFrame = 0;
+  function kick() {
+    if (raf) return;
+    lastFrame = performance.now();
+    raf = requestAnimationFrame(tick);
+  }
+
+  function tick(now) {
+    raf = 0;
+    if (mode !== "replay") return;
+    const r = replay;
+    const dt = Math.min(100, now - lastFrame);
+    lastFrame = now;
+    const beatMs = r.manual ? STEP_MS : BEAT_MS / speed;
+    if (r.playing || r.manual) r.progress = Math.min(1, r.progress + dt / beatMs);
+    // The camera keeps its own clock so a move started just before a pause
+    // still finishes.
+    if (r.cam) {
+      r.cam.t = Math.min(1, r.cam.t + dt / (beatMs * ANIM_SHARE));
+      applyCam(lerpCam(r.cam.from, r.cam.to, ease(r.cam.t)));
+      if (r.cam.t >= 1) r.cam = null;
+    }
+    draw();
+    if (r.progress >= 1) {
+      r.manual = false;
+      if (r.playing) {
+        if (r.beat + 1 >= r.beats.length) return finishReplay();
+        return goTo(r.beat + 1, false);
+      }
+    }
+    if (r.playing || r.manual || r.cam) raf = requestAnimationFrame(tick);
+  }
+
+  // ---- replay camera ----
+  //
+  // The first insertion frames the whole super-triangle. Over the next few
+  // the camera zooms in geometrically until it frames just the user's points,
+  // and holds there; the clean-up re-frames the points.
+
+  // The part of the screen not covered by the header, caption and controls.
+  function stageRect() {
+    const top = headerEl.getBoundingClientRect().bottom + 16;
+    const bottom = Math.max(top + 120, barEl.getBoundingClientRect().top - 130);
+    return { left: 16, right: window.innerWidth - 16, top, bottom };
+  }
+
+  function fitBox(minX, minY, maxX, maxY, maxScale) {
+    const u = stageRect();
+    const w = Math.max(maxX - minX, 1), h = Math.max(maxY - minY, 1);
+    const s = Math.min((u.right - u.left) / w, (u.bottom - u.top) / h, maxScale);
+    return { cx: (minX + maxX) / 2, cy: (minY + maxY) / 2, s };
+  }
+
+  function boxOf(pts) {
+    const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+    return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+  }
+
+  function camFor(beat) {
+    const { trace, beats } = replay;
+    const pointsCam = () => {
+      const [x0, y0, x1, y1] = boxOf(trace.all.slice(0, trace.n));
+      const pad = Math.max(x1 - x0, y1 - y0) * 0.08 + 10;
+      return fitBox(x0 - pad, y0 - pad, x1 + pad, y1 + pad, 2);
+    };
+    const b = beats[beat];
+    const zoomSteps = Math.min(trace.n - 1, ZOOM_STEPS);
+    const k = !b.ins || zoomSteps === 0 ? 1 : Math.min(1, b.i / zoomSteps);
+    if (k >= 1) return pointsCam();
+    const superCam = fitBox(...boxOf(trace.all.slice(trace.n)), MAX_SCALE);
+    return lerpCam(superCam, pointsCam(), k);
+  }
+
+  function camKey(beat) {
+    const b = replay.beats[beat];
+    return b.ins ? Math.min(b.i, ZOOM_STEPS) : "end";
+  }
+
+  // Interpolate scale in log space so each step of a zoom feels the same size.
+  function lerpCam(a, b, t) {
+    return {
+      cx: a.cx + (b.cx - a.cx) * t,
+      cy: a.cy + (b.cy - a.cy) * t,
+      s: Math.exp(Math.log(a.s) + (Math.log(b.s) - Math.log(a.s)) * t),
+    };
+  }
+
+  function stageCentre() {
+    const u = stageRect();
+    return { x: (u.left + u.right) / 2, y: (u.top + u.bottom) / 2 };
+  }
+
+  function currentCam() {
+    const c = stageCentre();
+    const w = toWorld(c.x, c.y);
+    return { cx: w.x, cy: w.y, s: view.s };
+  }
+
+  function applyCam(cam) {
+    const c = stageCentre();
+    view.s = cam.s;
+    view.x = c.x - cam.cx * cam.s;
+    view.y = c.y - cam.cy * cam.s;
   }
 
   // ---- interaction ----
@@ -462,6 +1004,7 @@
       if (gesture.panning) {
         view.x += e.clientX - gesture.lastX;
         view.y += e.clientY - gesture.lastY;
+        if (replay) replay.cam = null;
         draw();
       }
       gesture.lastX = e.clientX;
@@ -475,7 +1018,7 @@
     // points and current selection untouched.
     if (e.type === "pointerup" && gesture && gesture.id === e.pointerId && !gesture.panning) {
       if (mode === "place") addPoint(gesture.x, gesture.y);
-      else probe(gesture.x, gesture.y);
+      else if (mode === "explore") probe(gesture.x, gesture.y);
     }
     if (gesture && gesture.id === e.pointerId) gesture = null;
     if (pointers.size < 2) pinch = null;
@@ -494,17 +1037,38 @@
   document.getElementById("zoom-in").addEventListener("click", () => zoomCentre(1.25));
   document.getElementById("zoom-out").addEventListener("click", () => zoomCentre(1 / 1.25));
 
-  confirmBtn.addEventListener("click", () => {
-    triangles = delaunay(points);
-    if (triangles.length === 0) {
+  function build() {
+    const trace = {};
+    if (delaunay(points, trace).length === 0) {
       statusEl.textContent = "Points are collinear; add one off the line";
       return;
     }
-    mode = "explore";
-    touch = null;
-    hit = null;
-    updateUI();
-    draw();
+    startReplay(trace);
+  }
+  confirmBtn.addEventListener("click", build);
+  replayBtn.addEventListener("click", build);
+
+  backBtn.addEventListener("click", () => step(-1));
+  nextBtn.addEventListener("click", () => step(1));
+  playBtn.addEventListener("click", togglePlay);
+  skipBtn.addEventListener("click", () => {
+    applyCam(camFor(replay.beats.length - 1));
+    finishReplay();
+  });
+  speedBtn.addEventListener("click", () => {
+    speed = SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length];
+    try { localStorage.setItem("delaunay.speed", String(speed)); } catch {}
+    updateReplayUI();
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (mode !== "replay" || e.repeat && e.key === " ") return;
+    if (e.key === "ArrowLeft") step(-1);
+    else if (e.key === "ArrowRight") step(1);
+    // A focused button already handles Space itself.
+    else if (e.key === " " && !(document.activeElement instanceof HTMLButtonElement)) togglePlay();
+    else return;
+    e.preventDefault();
   });
 
   resetBtn.addEventListener("click", () => {
@@ -524,7 +1088,8 @@
   // Exposed for headless checks.
   window.__app = {
     get points() { return points; }, get triangles() { return triangles; },
-    get hit() { return hit; }, view, delaunay, circumcircle,
+    get hit() { return hit; }, get mode() { return mode; }, get replay() { return replay; },
+    view, delaunay, circumcircle,
   };
 
   resize();

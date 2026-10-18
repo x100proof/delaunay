@@ -14,6 +14,14 @@ speed and numerical robustness.
 
 1. Click or tap to place points.
 2. Press **Confirm** to build the Delaunay mesh (at least three points, not all in a line).
+   The build plays back step by step, starting from the super-triangle. Each point is
+   added in four steps: the new point arrives, the triangles whose circumcircles contain
+   it are found, they are cut out to leave a hole, and the hole is filled by joining the
+   new point to its rim. The clean-up then removes the super-triangle and, if that leaves
+   gaps along the edge, patches them.
+   - **Play / Pause**, and **Back** / **Next** to step one at a time (or ← / → and Space).
+   - The speed button cycles through 0.5×, 1×, 2×, 4× and 8× (1× is one step per second).
+   - **Skip** jumps to the finished mesh. **Replay** plays the build again.
 3. Tap inside any triangle to highlight it and draw:
    - its circumcircle,
    - the circumcentre,
@@ -26,8 +34,17 @@ or touch-and-drag to pan.
 ## How it works
 
 - The mesh is built with the [Bowyer-Watson algorithm](https://en.wikipedia.org/wiki/Bowyer%E2%80%93Watson_algorithm):
-  start from a large "super-triangle", insert points one at a time, remove every triangle
-  whose circumcircle contains the new point, and re-triangulate the resulting hole.
+  start from a "super-triangle" just big enough to enclose the points, insert points one
+  at a time, remove every triangle whose circumcircle contains the new point, and
+  re-triangulate the resulting hole.
+- Simply deleting the super-triangle's triangles at the end is not enough: a true Delaunay
+  triangle along the hull is never built if its circumcircle contains a super-triangle
+  corner, which leaves notches in the mesh. A bigger super-triangle only makes this rarer.
+  Instead, each corner is removed in turn and the gap it leaves is refilled with Delaunay
+  triangles, so the result is correct for any enclosing super-triangle.
+- For the replay, `delaunay()` optionally records each insertion into a trace. The
+  player then just draws one recorded step at a time, so the algorithm itself stays
+  a plain loop.
 - Finding the tapped triangle is a straightforward point-in-triangle test against every
   triangle in the mesh.
 
